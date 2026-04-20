@@ -14,9 +14,7 @@ const handle = app.getRequestHandler();
 app.prepare().then(() => {
     const server = express();
     const httpServer = http.createServer(server);
-    const io = new Server(httpServer, {
-        cors: { origin: "*" }
-    });
+    const io = new Server(httpServer, { cors: { origin: "*" } });
 
     io.on('connection', (socket) => {
         socket.on('start-session', async (data) => {
@@ -31,14 +29,10 @@ app.prepare().then(() => {
             const conn = makeWASocket({
                 auth: state,
                 version,
-                logger: pino({ level: "silent" }),
-                // ലേറ്റസ്റ്റ് Chrome User Agent വഴി ലോഗിൻ എറർ ഒഴിവാക്കുന്നു
-                browser: ["Ubuntu", "Chrome", "124.0.6367.60"], 
+                logger: pino({ level: "silent" }), // ലോഗ് കുറച്ചു
+                browser: Browsers.ubuntu("Chrome"), // ബ്രൗസർ മാറ്റി നോക്കുന്നു
                 syncFullHistory: false,
-                printQRInTerminal: false,
-                connectTimeoutMs: 60000,
-                defaultQueryTimeoutMs: 0,
-                keepAliveIntervalMs: 10000
+                printQRInTerminal: false
             });
 
             conn.ev.on("creds.update", saveCreds);
@@ -52,56 +46,49 @@ app.prepare().then(() => {
                 }
 
                 if (connection === "open") {
-                    // സെഷൻ ഐഡി Hex ഫോർമാറ്റിൽ
-                    const sessionID = "NEXA-MD~" + Buffer.from(JSON.stringify(conn.authState.creds)).toString('hex');
+                    const sessionID = "NEXA-MD~" + Buffer.from(JSON.stringify(conn.authState.creds)).toString('base64');
                     
+                    // മെസ്സേജ് അയക്കാൻ കുറച്ച് സമയം കൂടി നൽകുന്നു
                     await delay(3000); 
+                    await conn.sendMessage(conn.user.id, { text: `*NEXA-MD SESSION CONNECTED*\n\n${sessionID}` });
                     
-                    await conn.sendMessage(conn.user.id, { 
-                        text: `*NEXA-MD SESSION CONNECTED*\n\n*ID:* \`\`\`${sessionID}\`\`\`\n\n_Keep this ID safe. Local storage cleaned in 10 seconds._` 
-                    });
-
                     socket.emit('connected', { sessionID });
+                    console.log("Session Connected: " + sessionID);
 
-                    // 10 സെക്കൻഡിന് ശേഷം സ്റ്റോറേജ് ക്ലീൻ ചെയ്യുന്നു
+                    // കണക്ഷൻ ഉടനെ കട്ട് ചെയ്യാതെ 10 സെക്കൻഡ് വെയിറ്റ് ചെയ്യുന്നു
                     setTimeout(async () => {
-                        try {
-                            conn.end(); 
-                            if (fs.existsSync(sessionDir)) {
-                                fs.rmSync(sessionDir, { recursive: true, force: true });
-                            }
-                        } catch (err) {
-                            console.log("Cleanup Error: ", err);
-                        }
+                        conn.end();
+                        if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
                     }, 10000);
                 }
 
                 if (connection === "close") {
                     const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                    if (shouldReconnect) {
-                        socket.emit('error', "Connection closed. Please try again.");
+                    if (shouldReconnect && connection !== "open") {
+                        // എറർ ഉണ്ടെങ്കിൽ റീ കണക്ട് ചെയ്യാൻ ശ്രമിക്കരുത്, പകരം യൂസറോട് വീണ്ടും ചെയ്യാൻ പറയാം
+                        socket.emit('error', "Connection failed. Please refresh and try again.");
                     }
                 }
             });
 
             if (type === 'pair' && phone) {
+                // പെയറിംഗ് കോഡിന് മുൻപ് ചെറിയൊരു ഡിലേ നൽകുന്നു
                 await delay(3000); 
                 try {
                     const code = await conn.requestPairingCode(phone.replace(/[^0-9]/g, ''));
                     socket.emit('code', code);
                 } catch (err) {
-                    socket.emit('error', "WhatsApp limit reached. Try QR method.");
+                    console.log(err);
+                    socket.emit('error', "WhatsApp limits exceeded. Try again in a few minutes.");
                 }
             }
         });
     });
 
-    server.all('*', (req, res) => {
-        return handle(req, res);
-    });
+    server.all('*', (req, res) => handle(req, res));
 
     const PORT = process.env.PORT || 3000;
     httpServer.listen(PORT, "0.0.0.0", () => {
-        console.log(`🚀 Server running on Port ${PORT}`);
+        console.log(`🚀 NEXA-MD Running on Port ${PORT}`);
     });
 });
