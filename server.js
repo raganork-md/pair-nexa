@@ -20,7 +20,7 @@ const app = next({ dev });
 const handle = app.getRequestHandler();
 
 // ═══════════════════════════════════════════════════════
-//  ANTI-DETECTION SYSTEM (NO PROXY NEEDED)
+//  ANTI-DETECTION
 // ═══════════════════════════════════════════════════════
 
 const BROWSER_PROFILES = [
@@ -40,7 +40,7 @@ function getRandomDelay(min, max) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  WA CONNECTION - RENDER OPTIMIZED (PROXY-FREE)
+//  CONNECTION MANAGER
 // ═══════════════════════════════════════════════════════
 
 class ConnectionManager {
@@ -72,8 +72,7 @@ class ConnectionManager {
         console.log(`[Attempt ${this.retryCount + 1}/${this.maxRetries}] Browser: ${browser[1]}`);
 
         this.socket.emit('status', {
-            message: `Connecting... (attempt ${this.retryCount + 1})`,
-            proxy: false
+            message: `Connecting... (attempt ${this.retryCount + 1})`
         });
 
         const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
@@ -86,11 +85,7 @@ class ConnectionManager {
             version = [2, 3000, 1015901307];
         }
 
-        // ═══ HUMAN-LIKE DELAY — KEY TO AVOIDING BLOCK ═══
-        // Render IP block mainly happens due to rapid reconnections
-        // Slow down = look like real user
-        const humanDelay = getRandomDelay(2000, 5000);
-        await delay(humanDelay);
+        await delay(getRandomDelay(2000, 5000));
 
         const socketConfig = {
             auth: state,
@@ -100,36 +95,14 @@ class ConnectionManager {
             printQRInTerminal: false,
             syncFullHistory: false,
             markOnlineOnConnect: false,
-            fireInitQueries: false,           // 🔑 reduces initial traffic
-            connectTimeoutMs: 120000,         // 🔑 longer timeout for Render
+            fireInitQueries: false,
+            connectTimeoutMs: 120000,
             defaultQueryTimeoutMs: 0,
-            retryRequestDelayMs: getRandomDelay(3000, 7000),  // 🔑 slower
-            keepAliveIntervalMs: getRandomDelay(30000, 55000), // 🔑 randomized
+            retryRequestDelayMs: getRandomDelay(3000, 7000),
+            keepAliveIntervalMs: getRandomDelay(30000, 55000),
             emitOwnEvents: false,
             generateHighQualityLinkPreview: false,
             getMessage: async () => ({ conversation: '' }),
-            patchMessageBeforeSending: (msg) => {
-                // 🔑 Reduce message fingerprint
-                const requiresPatch = !!(
-                    msg.buttonsMessage ||
-                    msg.templateMessage ||
-                    msg.listMessage
-                );
-                if (requiresPatch) {
-                    msg = {
-                        viewOnceMessage: {
-                            message: {
-                                messageContextInfo: {
-                                    deviceListMetadataVersion: 2,
-                                    deviceListMetadata: {},
-                                },
-                                ...msg,
-                            },
-                        },
-                    };
-                }
-                return msg;
-            },
         };
 
         this.conn = makeWASocket(socketConfig);
@@ -138,7 +111,6 @@ class ConnectionManager {
 
         // ═══ PAIRING CODE ═══
         if (this.type === 'pair' && this.phone) {
-            // 🔑 Wait longer before pairing — critical for Render
             const pairDelay = getRandomDelay(5000, 9000);
             setTimeout(async () => {
                 if (this.isDestroyed) return;
@@ -149,7 +121,6 @@ class ConnectionManager {
                 } catch (err) {
                     console.log(`Pairing failed: ${err.message}`);
                     this.retryCount++;
-                    // 🔑 Exponential backoff — this is what saves you without proxy
                     const backoff = getRandomDelay(
                         5000 * Math.pow(2, this.retryCount),
                         10000 * Math.pow(2, this.retryCount)
@@ -170,6 +141,7 @@ class ConnectionManager {
             if (this.isDestroyed) return;
             const { connection, qr, lastDisconnect } = update;
 
+            // ═══ QR CODE ═══
             if (qr && this.type === 'qr') {
                 try {
                     const qrBase64 = await QRCode.toDataURL(qr);
@@ -179,33 +151,56 @@ class ConnectionManager {
                 }
             }
 
+            // ═══════════════════════════════════════════════
+            //  CONNECTED — SESSION ID GENERATE & SEND
+            // ═══════════════════════════════════════════════
             if (connection === "open") {
                 console.log(`✅ Connected: ${this.socket.id}`);
-                // 🔑 Wait before sending message — don't spam right after connect
                 await delay(getRandomDelay(5000, 10000));
 
                 try {
+                    // ── creds.json read ചെയ്യുക ──
                     const credsFile = path.join(this.sessionDir, 'creds.json');
+                    if (!fs.existsSync(credsFile)) {
+                        throw new Error('creds.json not found');
+                    }
                     const credsData = fs.readFileSync(credsFile, 'utf-8');
-                    const sessionID = "NEXA-MD~" +
-                        Buffer.from(credsData).toString('base64');
 
-                    await this.conn.sendMessage(this.conn.user.id, {
+                    // ══════════════════════════════════════
+                    //  NEXA~ BASE64 SESSION ID FORMAT
+                    // ══════════════════════════════════════
+                    // creds.json → Base64 encode → NEXA~ prefix add
+                    const base64Creds = Buffer.from(credsData, 'utf-8').toString('base64');
+                    const sessionID = `NEXA~${base64Creds}`;
+
+                    // ── സ്വന്തം നമ്പറിലേക്ക് session ID അയയ്ക്കുക ──
+                    const userJid = this.conn.user.id;
+
+                    await this.conn.sendMessage(userJid, {
                         text:
-                            `*✅ NEXA-MD SESSION CONNECTED*\n\n` +
-                            `*Session ID:*\n\`\`\`${sessionID}\`\`\`\n\n` +
-                            `_Generated at ${new Date().toLocaleString()}_`
+                            `╔═══════════════════════╗\n` +
+                            `║  ✅ NEXA-MD CONNECTED  ║\n` +
+                            `╚═══════════════════════╝\n\n` +
+                            `📌 *Your Session ID:*\n\n` +
+                            `\`\`\`${sessionID}\`\`\`\n\n` +
+                            `⏰ _${new Date().toLocaleString()}_\n\n` +
+                            `⚠️ _This ID is private. Do not share._`
                     });
 
+                    console.log(`📤 Session ID sent to ${userJid}`);
+
+                    // ── Frontend-ലേക്കും send ──
                     this.socket.emit('connected', { sessionID });
+
                 } catch (e) {
-                    console.log('Session save error:', e.message);
-                    this.socket.emit('error', 'Session generated but send failed.');
+                    console.log('Session ID error:', e.message);
+                    this.socket.emit('error', 'Connected but session ID generation failed.');
                 }
 
                 setTimeout(() => this.cleanup(), 15000);
             }
 
+            // ═══ DISCONNECTED ═══
             if (connection === "close") {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const reason = lastDisconnect?.error?.output?.payload?.message || '';
@@ -218,7 +213,6 @@ class ConnectionManager {
                     return;
                 }
 
-                // 🔑 IP BLOCK DETECTION — use exponential backoff instead of proxy
                 const blockCodes = [405, 503, 428, 402, 401, 440, 408, 500];
                 const isBlocked =
                     blockCodes.includes(statusCode) ||
@@ -227,37 +221,28 @@ class ConnectionManager {
 
                 if (isBlocked) {
                     this.retryCount++;
-                    // 🔑 EXPONENTIAL BACKOFF — the free alternative to proxies
-                    // Each retry waits exponentially longer
                     const backoff = getRandomDelay(
                         8000 * Math.pow(2, this.retryCount),
                         15000 * Math.pow(2, this.retryCount)
                     );
-
                     this.socket.emit('status', {
-                        message:
-                            `Rate limited. Waiting ${Math.round(backoff / 1000)}s ` +
-                            `before retry (${this.retryCount}/${this.maxRetries})`
+                        message: `Rate limited. Waiting ${Math.round(backoff / 1000)}s (${this.retryCount}/${this.maxRetries})`
                     });
-
-                    // 🔑 Clean old session before retry — fresh auth state
                     try {
                         if (this.conn) this.conn.end();
                         if (fs.existsSync(this.sessionDir)) fs.removeSync(this.sessionDir);
                     } catch {}
-
                     await delay(backoff);
                     await this.connect();
                     return;
                 }
 
-                // Normal disconnect — quick retry
                 if (this.retryCount < 3) {
                     this.retryCount++;
                     await delay(getRandomDelay(3000, 6000));
                     await this.connect();
                 } else {
-                    this.socket.emit('error', 'Connection failed. Try again in a few minutes.');
+                    this.socket.emit('error', 'Connection failed. Try again later.');
                     this.cleanup();
                 }
             }
@@ -272,15 +257,14 @@ class ConnectionManager {
 }
 
 // ═══════════════════════════════════════════════════════
-//  RATE LIMITER — GLOBAL PROTECTION
+//  RATE LIMITER
 // ═══════════════════════════════════════════════════════
 
 const connectionTimestamps = [];
-const MAX_CONNECTIONS_PER_MINUTE = 3; // 🔑 limit concurrent sessions
+const MAX_CONNECTIONS_PER_MINUTE = 3;
 
 function canConnect() {
     const now = Date.now();
-    // Remove timestamps older than 60s
     while (connectionTimestamps.length > 0 && now - connectionTimestamps[0] > 60000) {
         connectionTimestamps.shift();
     }
@@ -299,14 +283,11 @@ app.prepare().then(() => {
     const activeSessions = new Map();
 
     io.on('connection', (socket) => {
-        console.log(`🔌 Connected: ${socket.id}`);
+        console.log(`🔌 Client: ${socket.id}`);
 
         socket.on('start-session', async (data) => {
-            // 🔑 GLOBAL RATE LIMIT CHECK
             if (!canConnect()) {
-                socket.emit('status', {
-                    message: 'Server busy. Please wait 60 seconds...'
-                });
+                socket.emit('status', { message: 'Server busy. Wait 60 seconds...' });
                 return;
             }
 
@@ -315,7 +296,6 @@ app.prepare().then(() => {
             }
 
             connectionTimestamps.push(Date.now());
-
             const { type, phone } = data;
             const manager = new ConnectionManager(socket, type, phone);
             activeSessions.set(socket.id, manager);
@@ -324,14 +304,13 @@ app.prepare().then(() => {
                 await manager.start();
             } catch (err) {
                 console.log('Start error:', err.message);
-                socket.emit('error', 'Failed to start session.');
+                socket.emit('error', 'Failed to start.');
                 manager.cleanup();
                 activeSessions.delete(socket.id);
             }
         });
 
         socket.on('disconnect', () => {
-            console.log(`🔌 Disconnected: ${socket.id}`);
             if (activeSessions.has(socket.id)) {
                 activeSessions.get(socket.id).cleanup();
                 activeSessions.delete(socket.id);
@@ -343,7 +322,6 @@ app.prepare().then(() => {
 
     const PORT = process.env.PORT || 3000;
     httpServer.listen(PORT, "0.0.0.0", () => {
-        console.log(`🚀 NEXA-MD running on port ${PORT}`);
-        console.log(`🛡️  Mode: PROXY-FREE (exponential backoff)`);
+        console.log(`🚀 NEXA-MD on port ${PORT}`);
     });
 });
