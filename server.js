@@ -2,10 +2,38 @@ const express = require('express');
 const next = require('next');
 const http = require('http');
 const { Server } = require('socket.io');
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, Browsers, delay, DisconnectReason } = require("@whiskeysockets/baileys");
+const { 
+    default: makeWASocket, 
+    useMultiFileAuthState, 
+    Browsers, 
+    delay, 
+    makeCacheableSignalKeyStore, 
+    DisconnectReason 
+} = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const QRCode = require('qrcode');
-const fs = require('fs');
+const fs = require('fs-extra');
+const axios = require("axios");
+const FormData = require("form-data");
+
+// സ്പാർക്കിയുടെ എൻകോഡിംഗ് ഫങ്ക്ഷൻ
+async function encodeText(content) {
+    const formData = new FormData();
+    formData.append("content", content);
+    formData.append("filename", "creds.json");
+    formData.append("language", "json");
+
+    try {
+        const res = await axios.post(
+            "https://aswin-sparky-pastebin.onrender.com/api/paste",
+            formData,
+            { headers: { ...formData.getHeaders(), Accept: "*/*" } }
+        );
+        return res.data.slug;
+    } catch (err) {
+        return null;
+    }
+}
 
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
@@ -20,25 +48,25 @@ app.prepare().then(() => {
         socket.on('start-session', async (data) => {
             const { type, phone } = data;
             const sessionDir = '/tmp/session-' + socket.id;
-            
-            if (!fs.existsSync('/tmp')) fs.mkdirSync('/tmp');
+            if (fs.existsSync(sessionDir)) fs.emptyDirSync(sessionDir);
 
             const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-            const { version } = await fetchLatestBaileysVersion();
 
             const conn = makeWASocket({
-                auth: state,
-                version,
-                logger: pino({ level: "silent" }), // ലോഗ് കുറച്ചു
-                browser: Browsers.ubuntu("Chrome"), // ബ്രൗസർ മാറ്റി നോക്കുന്നു
-                syncFullHistory: false,
-                printQRInTerminal: false
+                auth: {
+                    creds: state.creds,
+                    keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+                },
+                printQRInTerminal: false,
+                logger: pino({ level: "fatal" }),
+                browser: ["Ubuntu", "Chrome", "20.0.04"], // സ്പാർക്കി വേർഷൻ
+                syncFullHistory: false
             });
 
             conn.ev.on("creds.update", saveCreds);
 
             conn.ev.on("connection.update", async (s) => {
-                const { connection, qr, lastDisconnect } = s;
+                const { connection, qr } = s;
 
                 if (qr && type === 'qr') {
                     const qrBase64 = await QRCode.toDataURL(qr);
@@ -46,49 +74,44 @@ app.prepare().then(() => {
                 }
 
                 if (connection === "open") {
-                    const sessionID = "NEXA-MD~" + Buffer.from(JSON.stringify(conn.authState.creds)).toString('base64');
+                    await delay(5000);
                     
-                    // മെസ്സേജ് അയക്കാൻ കുറച്ച് സമയം കൂടി നൽകുന്നു
-                    await delay(3000); 
-                    await conn.sendMessage(conn.user.id, { text: `*NEXA-MD SESSION CONNECTED*\n\n${sessionID}` });
-                    
-                    socket.emit('connected', { sessionID });
-                    console.log("Session Connected: " + sessionID);
+                    try {
+                        const credsData = fs.readFileSync(`${sessionDir}/creds.json`, 'utf-8');
+                        const slug = await encodeText(credsData);
+                        const sessionID = slug ? "NEXA-MD~" + slug : "NEXA-MD~ERROR";
 
-                    // കണക്ഷൻ ഉടനെ കട്ട് ചെയ്യാതെ 10 സെക്കൻഡ് വെയിറ്റ് ചെയ്യുന്നു
-                    setTimeout(async () => {
-                        conn.end();
-                        if (fs.existsSync(sessionDir)) fs.rmSync(sessionDir, { recursive: true, force: true });
-                    }, 10000);
-                }
+                        await conn.sendMessage(conn.user.id, { 
+                            text: `*NEXA-MD SESSION CONNECTED*\n\n*ID:* \`\`\`${sessionID}\`\`\`` 
+                        });
 
-                if (connection === "close") {
-                    const shouldReconnect = (lastDisconnect?.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-                    if (shouldReconnect && connection !== "open") {
-                        // എറർ ഉണ്ടെങ്കിൽ റീ കണക്ട് ചെയ്യാൻ ശ്രമിക്കരുത്, പകരം യൂസറോട് വീണ്ടും ചെയ്യാൻ പറയാം
-                        socket.emit('error', "Connection failed. Please refresh and try again.");
+                        socket.emit('connected', { sessionID });
+
+                        // 10 സെക്കൻഡിന് ശേഷം ക്ലീൻ ചെയ്യുന്നു
+                        setTimeout(() => {
+                            conn.end();
+                            if (fs.existsSync(sessionDir)) fs.removeSync(sessionDir);
+                        }, 10000);
+
+                    } catch (e) {
+                        socket.emit('error', "Session storage error.");
                     }
                 }
             });
 
             if (type === 'pair' && phone) {
-                // പെയറിംഗ് കോഡിന് മുൻപ് ചെറിയൊരു ഡിലേ നൽകുന്നു
-                await delay(3000); 
+                await delay(2000);
                 try {
                     const code = await conn.requestPairingCode(phone.replace(/[^0-9]/g, ''));
                     socket.emit('code', code);
                 } catch (err) {
-                    console.log(err);
-                    socket.emit('error', "WhatsApp limits exceeded. Try again in a few minutes.");
+                    socket.emit('error', "WhatsApp pairing failed. Try again.");
                 }
             }
         });
     });
 
     server.all('*', (req, res) => handle(req, res));
-
     const PORT = process.env.PORT || 3000;
-    httpServer.listen(PORT, "0.0.0.0", () => {
-        console.log(`🚀 NEXA-MD Running on Port ${PORT}`);
-    });
+    httpServer.listen(PORT, "0.0.0.0", () => console.log(`🚀 Port: ${PORT}`));
 });
