@@ -11,7 +11,8 @@ const {
 } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 const QRCode = require('qrcode');
-const fs = require('fs');
+const fs = require('fs-extra');
+const path = require('path');
 
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
@@ -27,28 +28,32 @@ app.prepare().then(() => {
     io.on('connection', (socket) => {
         socket.on('start-session', async (data) => {
             const { type, phone } = data;
-            const sessionDir = './session-' + socket.id;
+            // ഓരോ സോക്കറ്റിനും പ്രത്യേകം താൽക്കാലിക സെഷൻ ഫോൾഡർ
+            const sessionDir = path.join(__dirname, 'session-' + socket.id);
             
+            if (fs.existsSync(sessionDir)) fs.removeSync(sessionDir);
+
             const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
 
             const conn = makeWASocket({
                 auth: state,
-                // IP Block ഒഴിവാക്കാൻ ലേറ്റസ്റ്റ് സ്റ്റേബിൾ വേർഷൻ ഉപയോഗിക്കുന്നു
-                version: [2, 3000, 1015901307], 
+                logger: pino({ level: 'silent' }),
+                // 1. Meta AI നിർദ്ദേശിച്ച സേഫ് ബ്രൗസർ (NEXA എന്ന് ഉപയോഗിക്കരുത്)
+                browser: Browsers.macOS('Desktop'), 
+                // 2. 2026 ഏപ്രിൽ അപ്‌ഡേറ്റ് പ്രകാരമുള്ള ലേറ്റസ്റ്റ് വേർഷൻ
+                version: [2, 3000, 1023223821], 
                 printQRInTerminal: false,
-                logger: pino({ level: "silent" }),
-                // ലോഗിൻ എറർ വരാതിരിക്കാൻ ഒരു യഥാർത്ഥ Mac Chrome ആയി ലോഗിൻ ചെയ്യുന്നു
-                browser: ["Mac OS", "Chrome", "121.0.6167.160"],
                 syncFullHistory: false,
+                // 3. കണക്ട് ആയ ഉടനെ ഓൺലൈൻ സ്റ്റാറ്റസ് കാണിക്കില്ല (ബ്ലോക്ക് ഒഴിവാക്കാൻ)
+                markOnlineOnConnect: false,
                 connectTimeoutMs: 60000,
-                defaultQueryTimeoutMs: 0,
-                keepAliveIntervalMs: 10000
+                defaultQueryTimeoutMs: 0
             });
 
             conn.ev.on("creds.update", saveCreds);
 
             conn.ev.on("connection.update", async (s) => {
-                const { connection, qr } = s;
+                const { connection, qr, lastDisconnect } = s;
 
                 if (qr && type === 'qr') {
                     const qrBase64 = await QRCode.toDataURL(qr);
@@ -57,31 +62,46 @@ app.prepare().then(() => {
 
                 if (connection === "open") {
                     await delay(5000);
-                    // സെഷൻ ഐഡി (Base64 ഫോർമാറ്റിൽ)
-                    const sessionID = "NEXA-MD~" + Buffer.from(JSON.stringify(conn.authState.creds)).toString('base64');
                     
-                    await conn.sendMessage(conn.user.id, { text: `*NEXA-MD SESSION ID*\n\n${sessionID}` });
+                    // സെഷൻ ഡാറ്റ ഫയലിൽ നിന്ന് റീഡ് ചെയ്യുന്നു
+                    const credsFile = path.join(sessionDir, 'creds.json');
+                    const credsData = fs.readFileSync(credsFile, 'utf-8');
+                    
+                    // Base64 സെഷൻ ഐഡി ജനറേഷൻ
+                    const sessionID = "NEXA-MD~" + Buffer.from(credsData).toString('base64');
+                    
+                    await conn.sendMessage(conn.user.id, { 
+                        text: `*NEXA-MD SESSION CONNECTED*\n\n*ID:* \`\`\`${sessionID}\`\`\`` 
+                    });
+
                     socket.emit('connected', { sessionID });
 
-                    // സെഷൻ അയച്ച ശേഷം 10 സെക്കൻഡിൽ സ്റ്റോറേജ് ക്ലീൻ ചെയ്യും
+                    // 10 സെക്കൻഡിന് ശേഷം ക്ലീൻ ചെയ്യുന്നു
                     setTimeout(() => {
                         conn.end();
-                        if (fs.existsSync(sessionDir)) {
-                            fs.rmSync(sessionDir, { recursive: true, force: true });
-                        }
+                        if (fs.existsSync(sessionDir)) fs.removeSync(sessionDir);
                     }, 10000);
+                }
+
+                if (connection === "close") {
+                    const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+                    if (statusCode !== DisconnectReason.loggedOut) {
+                        socket.emit('error', "Connection failed. Try again with Mobile Data.");
+                    }
                 }
             });
 
             if (type === 'pair' && phone) {
-                await delay(3000); // പെട്ടെന്ന് ബ്ലോക്ക് ആകാതിരിക്കാൻ ചെറിയ ഡിലേ
-                try {
-                    const cleanNumber = phone.replace(/[^0-9]/g, '');
-                    const code = await conn.requestPairingCode(cleanNumber);
-                    socket.emit('code', code);
-                } catch (err) {
-                    socket.emit('error', "WhatsApp Temporary Block. Try QR method.");
-                }
+                // 4. മെറ്റ ഐ പറഞ്ഞ പോലെ 3 സെക്കൻഡ് വെയിറ്റ് ചെയ്ത് പെയറിംഗ് റിക്വസ്റ്റ് ചെയ്യുന്നു
+                setTimeout(async () => {
+                    try {
+                        const cleanNumber = phone.replace(/[^0-9]/g, '');
+                        const code = await conn.requestPairingCode(cleanNumber);
+                        socket.emit('code', code);
+                    } catch (err) {
+                        socket.emit('error', "WhatsApp IP Block. Please use Mobile Data and Flight Mode.");
+                    }
+                }, 3000);
             }
         });
     });
@@ -90,6 +110,6 @@ app.prepare().then(() => {
 
     const PORT = process.env.PORT || 3000;
     httpServer.listen(PORT, "0.0.0.0", () => {
-        console.log(`🚀 Server connected on port ${PORT}`);
+        console.log(`🚀 NEXA-MD Server running on port ${PORT}`);
     });
 });
