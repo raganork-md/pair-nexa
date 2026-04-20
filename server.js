@@ -8,27 +8,23 @@ const QRCode = require('qrcode');
 const fs = require('fs');
 
 const dev = process.env.NODE_ENV !== 'production';
-// Webpack fix for Termux/Android and Vercel compatibility
-const app = next({ 
-    dev,
-    conf: {
-        webpack: (config) => {
-            config.resolve.fallback = { fs: false, net: false, tls: false };
-            return config;
-        }
-    }
-});
+const app = next({ dev });
 const handle = app.getRequestHandler();
 
 app.prepare().then(() => {
     const server = express();
     const httpServer = http.createServer(server);
-    const io = new Server(httpServer);
+    const io = new Server(httpServer, {
+        cors: { origin: "*" }
+    });
 
     io.on('connection', (socket) => {
         socket.on('start-session', async (data) => {
             const { type, phone } = data;
-            const sessionDir = '/tmp/session-' + socket.id; // Vercel-ൽ /tmp മാത്രമേ റൈറ്റ് ചെയ്യാൻ പറ്റൂ
+            const sessionDir = '/tmp/session-' + socket.id;
+            
+            if (!fs.existsSync('/tmp')) fs.mkdirSync('/tmp');
+
             const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
             const { version } = await fetchLatestBaileysVersion();
 
@@ -52,7 +48,7 @@ app.prepare().then(() => {
 
                 if (connection === "open") {
                     const sessionID = "NEXA-MD~" + Buffer.from(JSON.stringify(conn.authState.creds)).toString('base64');
-                    await conn.sendMessage(conn.user.id, { text: `*NEXA-MD SESSION CONNECTED*\n\n\`\`\`${sessionID}\`\`\`` });
+                    await conn.sendMessage(conn.user.id, { text: `*NEXA-MD SESSION CONNECTED*\n\n${sessionID}` });
                     socket.emit('connected', { sessionID });
                     
                     await delay(5000);
@@ -62,18 +58,24 @@ app.prepare().then(() => {
             });
 
             if (type === 'pair' && phone) {
-                await delay(10000); 
+                await delay(5000); 
                 try {
                     const code = await conn.requestPairingCode(phone.replace(/[^0-9]/g, ''));
                     socket.emit('code', code);
                 } catch (err) {
-                    socket.emit('error', "WhatsApp server error. Try again.");
+                    socket.emit('error', "Try again later.");
                 }
             }
         });
     });
 
-    server.all('*', (req, res) => handle(req, res));
+    // ഇതാണ് "Not Found" ഒഴിവാക്കുന്ന മെയിൻ ലൈൻ
+    server.all('*', (req, res) => {
+        return handle(req, res);
+    });
+
     const PORT = process.env.PORT || 3000;
-    httpServer.listen(PORT, () => console.log(`🚀 Ready on Port ${PORT}`));
+    httpServer.listen(PORT, "0.0.0.0", () => {
+        console.log(`🚀 NEXA-MD Running on Port ${PORT}`);
+    });
 });
