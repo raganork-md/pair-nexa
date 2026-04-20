@@ -9,8 +9,8 @@
   },
   "dependencies": {
     "next": "14.2.4",
-    "react": "latest",
-    "react-dom": "latest",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "express": "^4.19.2",
     "socket.io": "^4.7.5",
     "socket.io-client": "^4.7.5",
@@ -20,6 +20,9 @@
     "lucide-react": "latest",
     "tailwindcss": "^3.4.1",
     "postcss": "^8.4.31",
-    "autoprefixer": "^10.4.16"
+    "autoprefixer": "^10.4.16",
+    "fs-extra": "^11.2.0",
+    "axios": "^1.6.0",
+    "form-data": "^4.0.0"
   }
 }
