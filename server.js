@@ -20,7 +20,7 @@ const app = next({ dev });
 const handle = app.getRequestHandler();
 
 // ═══════════════════════════════════════════════════════
-//  ANTI-DETECTION SYSTEM
+//  ANTI-DETECTION BROWSER ROTATION
 // ═══════════════════════════════════════════════════════
 
 const BROWSER_PROFILES = [
@@ -40,7 +40,7 @@ function getRandomDelay(min, max) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  WA CONNECTION MANAGER
+//  CONNECTION MANAGER
 // ═══════════════════════════════════════════════════════
 
 class ConnectionManager {
@@ -62,26 +62,14 @@ class ConnectionManager {
 
     async connect() {
         if (this.isDestroyed) return;
-        if (this.retryCount >= this.maxRetries) {
-            this.socket.emit('error', '❌ Max retries reached. Try again later.');
-            this.cleanup();
-            return;
-        }
-
+        
         const browser = getRandomBrowser();
-        this.socket.emit('status', { message: `Connecting... (attempt ${this.retryCount + 1})` });
+        this.socket.emit('status', { message: `Connecting... (${this.retryCount + 1})` });
 
         const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
+        let { version } = await fetchLatestBaileysVersion();
 
-        let version;
-        try {
-            const fetched = await fetchLatestBaileysVersion();
-            version = fetched.version;
-        } catch {
-            version = [2, 3000, 1015901307];
-        }
-
-        const socketConfig = {
+        this.conn = makeWASocket({
             auth: state,
             logger: pino({ level: 'silent' }),
             browser,
@@ -89,33 +77,23 @@ class ConnectionManager {
             printQRInTerminal: false,
             syncFullHistory: false,
             markOnlineOnConnect: false,
-            fireInitQueries: false,
-            connectTimeoutMs: 120000,
-            defaultQueryTimeoutMs: 0,
-            retryRequestDelayMs: getRandomDelay(3000, 7000),
-            keepAliveIntervalMs: getRandomDelay(30000, 55000),
-        };
+            connectTimeoutMs: 60000,
+        });
 
-        this.conn = makeWASocket(socketConfig);
         this.conn.ev.on("creds.update", saveCreds);
         this.setupEventHandlers();
 
         if (this.type === 'pair' && this.phone) {
-            const pairDelay = getRandomDelay(5000, 8000);
             setTimeout(async () => {
                 if (this.isDestroyed) return;
                 try {
-                    const cleanNumber = this.phone.replace(/[^0-9]/g, '');
-                    const code = await this.conn.requestPairingCode(cleanNumber);
+                    const code = await this.conn.requestPairingCode(this.phone.replace(/[^0-9]/g, ''));
                     this.socket.emit('code', code);
                 } catch (err) {
                     this.retryCount++;
-                    const backoff = getRandomDelay(5000 * Math.pow(2, this.retryCount), 10000 * Math.pow(2, this.retryCount));
-                    await delay(backoff);
-                    if (this.conn) this.conn.end();
                     await this.connect();
                 }
-            }, pairDelay);
+            }, 6000);
         }
     }
 
@@ -130,36 +108,39 @@ class ConnectionManager {
             }
 
             if (connection === "open") {
-                console.log(`✅ Connected: ${this.socket.id}`);
-                // ചെറിയൊരു വെയിറ്റിംഗ് സമയം (ബ്ലോക്ക് ഒഴിവാക്കാൻ)
-                await delay(7000);
+                console.log(`✅ Login Success: ${this.socket.id}`);
+                await delay(3000); // 3 second delay for stability
 
                 try {
-                    // 🔑 ഇതാ മാറ്റം: ഫയലിന് പകരം നേരിട്ട് മെമ്മറിയിൽ നിന്ന് creds എടുക്കുന്നു
+                    // 🔑 DIRECT MEMORY GENERATION (No file waiting)
                     const sessionData = JSON.stringify(this.conn.authState.creds);
                     const sessionID = "NEXA-MD~" + Buffer.from(sessionData).toString('base64');
 
-                    // സ്വന്തം നമ്പറിലേക്ക് അയക്കുന്നു
+                    // 1. ലോഗുകളിൽ പ്രിന്റ് ചെയ്യുന്നു (Render Logs-ൽ നിന്ന് നിനക്ക് കോപ്പി ചെയ്യാം)
+                    console.log("==============================");
+                    console.log("YOUR SESSION ID:", sessionID);
+                    console.log("==============================");
+
+                    // 2. വെബ്സൈറ്റിലേക്ക് അയക്കുന്നു
+                    this.socket.emit('connected', { sessionID });
+
+                    // 3. വാട്സാപ്പിലേക്ക് അയക്കുന്നു
                     await this.conn.sendMessage(this.conn.user.id, {
-                        text: `*✅ NEXA-MD SESSION ID*\n\n\`\`\`${sessionID}\`\`\`\n\n_Generated for ${this.phone || 'Your Number'}_`
+                        text: `*✅ NEXA-MD SESSION ID*\n\n\`\`\`${sessionID}\`\`\``
                     });
 
-                    this.socket.emit('connected', { sessionID });
-                    console.log("🚀 Session ID successfully sent to WhatsApp!");
                 } catch (e) {
-                    console.log('Session ID Send Error:', e.message);
-                    this.socket.emit('error', 'Session generated but failed to send to WhatsApp.');
+                    console.log('Error generating session:', e.message);
                 }
 
-                // ലോഗിൻ കഴിഞ്ഞാൽ 15 സെക്കന്റിനുള്ളിൽ സെഷൻ ഡാറ്റ ക്ലീൻ ചെയ്യും
-                setTimeout(() => this.cleanup(), 15000);
+                // Clean up after 20 seconds
+                setTimeout(() => this.cleanup(), 20000);
             }
 
             if (connection === "close") {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 if (statusCode !== DisconnectReason.loggedOut && this.retryCount < 3) {
                     this.retryCount++;
-                    await delay(5000);
                     await this.connect();
                 }
             }
@@ -181,7 +162,6 @@ app.prepare().then(() => {
     const server = express();
     const httpServer = http.createServer(server);
     const io = new Server(httpServer, { cors: { origin: "*" } });
-
     const activeSessions = new Map();
 
     io.on('connection', (socket) => {
@@ -201,7 +181,5 @@ app.prepare().then(() => {
     });
 
     server.all('*', (req, res) => handle(req, res));
-    httpServer.listen(process.env.PORT || 3000, () => {
-        console.log(`🚀 Server live on port ${process.env.PORT || 3000}`);
-    });
+    httpServer.listen(process.env.PORT || 3000, "0.0.0.0");
 });
