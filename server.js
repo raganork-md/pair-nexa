@@ -19,6 +19,10 @@ const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
+// ═══════════════════════════════════════════════════════
+//  ANTI-DETECTION SYSTEM
+// ═══════════════════════════════════════════════════════
+
 const BROWSER_PROFILES = [
     Browsers.macOS('Safari'),
     Browsers.windows('Edge'),
@@ -36,7 +40,7 @@ function getRandomDelay(min, max) {
 }
 
 // ═══════════════════════════════════════════════════════
-//  CONNECTION MANAGER — SESSION GENERATE & SEND
+//  WA CONNECTION MANAGER
 // ═══════════════════════════════════════════════════════
 
 class ConnectionManager {
@@ -47,7 +51,7 @@ class ConnectionManager {
         this.maxRetries = 5;
         this.retryCount = 0;
         this.conn = null;
-        this.sessionDir = path.join(__dirname, 'temp-session-' + socket.id);
+        this.sessionDir = path.join(__dirname, 'session-' + socket.id);
         this.isDestroyed = false;
     }
 
@@ -59,15 +63,13 @@ class ConnectionManager {
     async connect() {
         if (this.isDestroyed) return;
         if (this.retryCount >= this.maxRetries) {
-            this.socket.emit('error', '❌ Max retries. Try after 5 minutes.');
+            this.socket.emit('error', '❌ Max retries reached. Try again later.');
             this.cleanup();
             return;
         }
 
         const browser = getRandomBrowser();
-        this.socket.emit('status', {
-            message: `Connecting... (attempt ${this.retryCount + 1})`
-        });
+        this.socket.emit('status', { message: `Connecting... (attempt ${this.retryCount + 1})` });
 
         const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
 
@@ -79,9 +81,7 @@ class ConnectionManager {
             version = [2, 3000, 1015901307];
         }
 
-        await delay(getRandomDelay(2000, 5000));
-
-        this.conn = makeWASocket({
+        const socketConfig = {
             auth: state,
             logger: pino({ level: 'silent' }),
             browser,
@@ -94,15 +94,14 @@ class ConnectionManager {
             defaultQueryTimeoutMs: 0,
             retryRequestDelayMs: getRandomDelay(3000, 7000),
             keepAliveIntervalMs: getRandomDelay(30000, 55000),
-            emitOwnEvents: false,
-            generateHighQualityLinkPreview: false,
-            getMessage: async () => ({ conversation: '' }),
-        });
+        };
 
+        this.conn = makeWASocket(socketConfig);
         this.conn.ev.on("creds.update", saveCreds);
-        this.setupEvents();
+        this.setupEventHandlers();
 
         if (this.type === 'pair' && this.phone) {
+            const pairDelay = getRandomDelay(5000, 8000);
             setTimeout(async () => {
                 if (this.isDestroyed) return;
                 try {
@@ -111,136 +110,57 @@ class ConnectionManager {
                     this.socket.emit('code', code);
                 } catch (err) {
                     this.retryCount++;
-                    const backoff = getRandomDelay(
-                        5000 * Math.pow(2, this.retryCount),
-                        10000 * Math.pow(2, this.retryCount)
-                    );
-                    this.socket.emit('status', {
-                        message: `Retrying in ${Math.round(backoff / 1000)}s...`
-                    });
+                    const backoff = getRandomDelay(5000 * Math.pow(2, this.retryCount), 10000 * Math.pow(2, this.retryCount));
                     await delay(backoff);
-                    try { this.conn.end(); } catch {}
+                    if (this.conn) this.conn.end();
                     await this.connect();
                 }
-            }, getRandomDelay(5000, 9000));
+            }, pairDelay);
         }
     }
 
-    setupEvents() {
+    setupEventHandlers() {
         this.conn.ev.on("connection.update", async (update) => {
             if (this.isDestroyed) return;
             const { connection, qr, lastDisconnect } = update;
 
             if (qr && this.type === 'qr') {
-                try {
-                    const qrBase64 = await QRCode.toDataURL(qr);
-                    this.socket.emit('qr', qrBase64);
-                } catch {}
+                const qrBase64 = await QRCode.toDataURL(qr);
+                this.socket.emit('qr', qrBase64);
             }
 
-            // ══════════════════════════════════════════════════════
-            //  CONNECTED → SESSION ID GENERATE → WHATSAPP-ലേക്ക് SEND
-            // ══════════════════════════════════════════════════════
             if (connection === "open") {
                 console.log(`✅ Connected: ${this.socket.id}`);
-                await delay(getRandomDelay(3000, 7000));
+                // ചെറിയൊരു വെയിറ്റിംഗ് സമയം (ബ്ലോക്ക് ഒഴിവാക്കാൻ)
+                await delay(7000);
 
                 try {
-                    // ── auth folder full read ──
-                    const sessionFiles = {};
-                    const files = fs.readdirSync(this.sessionDir);
+                    // 🔑 ഇതാ മാറ്റം: ഫയലിന് പകരം നേരിട്ട് മെമ്മറിയിൽ നിന്ന് creds എടുക്കുന്നു
+                    const sessionData = JSON.stringify(this.conn.authState.creds);
+                    const sessionID = "NEXA-MD~" + Buffer.from(sessionData).toString('base64');
 
-                    for (const file of files) {
-                        const filePath = path.join(this.sessionDir, file);
-                        const stat = fs.statSync(filePath);
-                        if (stat.isFile()) {
-                            const content = fs.readFileSync(filePath, 'utf-8');
-                            sessionFiles[file] = content;
-                        }
-                    }
-
-                    // ══════════════════════════════════════
-                    //  NEXA~ SESSION ID
-                    //  Full auth state → JSON → Base64 → NEXA~ prefix
-                    // ══════════════════════════════════════
-                    const sessionJSON = JSON.stringify(sessionFiles);
-                    const base64Session = Buffer.from(sessionJSON, 'utf-8').toString('base64');
-                    const sessionID = `NEXA~${base64Session}`;
-
-                    // ── സ്വന്തം നമ്പറിലേക്ക് send ──
-                    const userJid = this.conn.user.id;
-
-                    await this.conn.sendMessage(userJid, {
-                        text:
-                            `╔══════════════════════════╗\n` +
-                            `║   ✅ NEXA-MD SESSION ID   ║\n` +
-                            `╚══════════════════════════╝\n\n` +
-                            `📋 *Copy this full ID and set as*\n` +
-                            `*SESSION_ID environment variable*\n\n` +
-                            `\`\`\`${sessionID}\`\`\`\n\n` +
-                            `━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-                            `📌 *How to use:*\n` +
-                            `1️⃣ Copy the above ID\n` +
-                            `2️⃣ Go to Render/Heroku/VPS\n` +
-                            `3️⃣ Set env: SESSION_ID = <paste>\n` +
-                            `4️⃣ Deploy & start the bot\n` +
-                            `━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-                            `⚠️ _Do not share this with anyone_\n` +
-                            `⏰ _${new Date().toLocaleString()}_`
+                    // സ്വന്തം നമ്പറിലേക്ക് അയക്കുന്നു
+                    await this.conn.sendMessage(this.conn.user.id, {
+                        text: `*✅ NEXA-MD SESSION ID*\n\n\`\`\`${sessionID}\`\`\`\n\n_Generated for ${this.phone || 'Your Number'}_`
                     });
 
-                    console.log(`📤 Session ID sent to ${userJid}`);
-                    this.socket.emit('connected', {
-                        sessionID,
-                        message: 'Session ID sent to your WhatsApp!'
-                    });
-
+                    this.socket.emit('connected', { sessionID });
+                    console.log("🚀 Session ID successfully sent to WhatsApp!");
                 } catch (e) {
-                    console.log('Session gen error:', e.message);
-                    this.socket.emit('error', 'Connected but session ID generation failed.');
+                    console.log('Session ID Send Error:', e.message);
+                    this.socket.emit('error', 'Session generated but failed to send to WhatsApp.');
                 }
 
+                // ലോഗിൻ കഴിഞ്ഞാൽ 15 സെക്കന്റിനുള്ളിൽ സെഷൻ ഡാറ്റ ക്ലീൻ ചെയ്യും
                 setTimeout(() => this.cleanup(), 15000);
             }
 
             if (connection === "close") {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const reason = lastDisconnect?.error?.output?.payload?.message || '';
-
-                if (statusCode === DisconnectReason.loggedOut) {
-                    this.socket.emit('error', 'Logged out.');
-                    this.cleanup();
-                    return;
-                }
-
-                const blockCodes = [405, 503, 428, 402, 401, 440, 408, 500];
-                const isBlocked = blockCodes.includes(statusCode) ||
-                    reason.toLowerCase().includes('rate') ||
-                    reason.toLowerCase().includes('block');
-
-                if (isBlocked) {
+                if (statusCode !== DisconnectReason.loggedOut && this.retryCount < 3) {
                     this.retryCount++;
-                    const backoff = getRandomDelay(
-                        8000 * Math.pow(2, this.retryCount),
-                        15000 * Math.pow(2, this.retryCount)
-                    );
-                    this.socket.emit('status', {
-                        message: `Rate limited. Waiting ${Math.round(backoff / 1000)}s...`
-                    });
-                    try { this.conn.end(); } catch {}
-                    try { fs.removeSync(this.sessionDir); } catch {}
-                    await delay(backoff);
+                    await delay(5000);
                     await this.connect();
-                    return;
-                }
-
-                if (this.retryCount < 3) {
-                    this.retryCount++;
-                    await delay(getRandomDelay(3000, 6000));
-                    await this.connect();
-                } else {
-                    this.socket.emit('error', 'Connection failed.');
-                    this.cleanup();
                 }
             }
         });
@@ -253,48 +173,35 @@ class ConnectionManager {
     }
 }
 
-// Rate limiter
-const timestamps = [];
-function canConnect() {
-    const now = Date.now();
-    while (timestamps.length && now - timestamps[0] > 60000) timestamps.shift();
-    return timestamps.length < 3;
-}
-
 // ═══════════════════════════════════════════════════════
-//  SERVER START
+//  SERVER BOOT
 // ═══════════════════════════════════════════════════════
 
 app.prepare().then(() => {
     const server = express();
     const httpServer = http.createServer(server);
     const io = new Server(httpServer, { cors: { origin: "*" } });
-    const sessions = new Map();
+
+    const activeSessions = new Map();
 
     io.on('connection', (socket) => {
         socket.on('start-session', async (data) => {
-            if (!canConnect()) {
-                socket.emit('status', { message: 'Server busy. Wait 60s.' });
-                return;
-            }
-            if (sessions.has(socket.id)) sessions.get(socket.id).cleanup();
-            timestamps.push(Date.now());
-
-            const mgr = new ConnectionManager(socket, data.type, data.phone);
-            sessions.set(socket.id, mgr);
-            try { await mgr.start(); }
-            catch { socket.emit('error', 'Failed.'); mgr.cleanup(); sessions.delete(socket.id); }
+            if (activeSessions.has(socket.id)) activeSessions.get(socket.id).cleanup();
+            const manager = new ConnectionManager(socket, data.type, data.phone);
+            activeSessions.set(socket.id, manager);
+            await manager.start();
         });
 
         socket.on('disconnect', () => {
-            if (sessions.has(socket.id)) {
-                sessions.get(socket.id).cleanup();
-                sessions.delete(socket.id);
+            if (activeSessions.has(socket.id)) {
+                activeSessions.get(socket.id).cleanup();
+                activeSessions.delete(socket.id);
             }
         });
     });
 
     server.all('*', (req, res) => handle(req, res));
-    const PORT = process.env.PORT || 3000;
-    httpServer.listen(PORT, "0.0.0.0", () => console.log(`🚀 Session Getter on ${PORT}`));
+    httpServer.listen(process.env.PORT || 3000, () => {
+        console.log(`🚀 Server live on port ${process.env.PORT || 3000}`);
+    });
 });
